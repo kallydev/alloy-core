@@ -1,15 +1,17 @@
+use alloc::vec::Vec;
+
+use alloy_primitives::{B256, Bytes, FixedBytes, Log, LogData};
+use alloy_sol_types::Error;
+pub use topic::EventTopic;
+pub use topic_list::TopicList;
+
 use crate::{
     abi::token::{Token, TokenSeq, WordToken},
     Result, SolType, Word,
 };
-use alloc::vec::Vec;
-use alloy_primitives::{FixedBytes, Log, LogData, B256};
 
 mod topic;
-pub use topic::EventTopic;
-
 mod topic_list;
-pub use topic_list::TopicList;
 
 /// Solidity event.
 ///
@@ -144,9 +146,19 @@ pub trait SolEvent: Sized {
     /// Decode the event from the given log info.
     fn decode_raw_log<I, D>(topics: I, data: &[u8], validate: bool) -> Result<Self>
     where
-        I: IntoIterator<Item = D>,
+        I: IntoIterator<Item = D> + Copy,
         D: Into<WordToken>,
     {
+        // Check the signature hash.
+        Self::check_log_signature(
+            &LogData::new_unchecked(
+                topics.into_iter()
+                    .map(|topic| topic.into().into())
+                    .collect(),
+                Bytes::copy_from_slice(data),
+            )
+        )?;
+
         let topics = Self::decode_topics(topics)?;
         let body = Self::abi_decode_data(data, validate)?;
         Ok(Self::new(topics, body))
@@ -160,5 +172,28 @@ pub trait SolEvent: Sized {
     /// Decode the event from the given log object.
     fn decode_log(log: &Log, validate: bool) -> Result<Log<Self>> {
         Self::decode_log_data(&log.data, validate).map(|data| Log { address: log.address, data })
+    }
+
+    /// Check the event signature hash.
+    fn check_log_signature(log: &LogData) -> Result<()> {
+        let new_invalid_log_error = || {
+            Error::InvalidLog {
+                // Get the type name and ignore the module path prefix.
+                name: std::any::type_name::<Self>().split("::").last().unwrap(),
+                log: Box::new(log.clone()),
+            }
+        };
+
+        // If the event is anonymous, it should have no topics.
+        if Self::ANONYMOUS && !log.topics().is_empty() {
+            return Err(new_invalid_log_error());
+        }
+
+        // If the event is not anonymous, the first topic should be equal to the signature hash.
+        if !Self::ANONYMOUS && log.topics().first() != Some(&Self::SIGNATURE_HASH) {
+            return Err(new_invalid_log_error());
+        }
+
+        Ok(())
     }
 }
